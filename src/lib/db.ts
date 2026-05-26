@@ -31,10 +31,20 @@ export async function getSessions(): Promise<Session[]> {
 }
 
 export async function saveSession(session: Session): Promise<void> {
-  const sessions = await getSessions();
-  // Avoid duplicates
-  const updated = [session, ...sessions.filter(s => s.id !== session.id)].slice(0, 100);
-  await fs.writeFile(DB_PATH, JSON.stringify(updated, null, 2));
+  try {
+    const sessions = await getSessions();
+    const updated = [session, ...sessions.filter(s => s.id !== session.id)].slice(0, 100);
+    
+    // Ensure data directory exists
+    const dataDir = path.dirname(DB_PATH);
+    await fs.mkdir(dataDir, { recursive: true });
+    
+    await fs.writeFile(DB_PATH, JSON.stringify(updated, null, 2));
+    console.log(`[DB] Session saved successfully: ${session.id}`);
+  } catch (err) {
+    console.error(`[DB] ERROR: Failed to save session:`, err);
+    throw err;
+  }
 }
 
 export async function deleteSession(id: string): Promise<void> {

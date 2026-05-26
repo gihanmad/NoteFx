@@ -69,34 +69,42 @@ export function TranscriptionResults({ results, isComplete, fileName }: Transcri
   // Auto-save logic to server
   useEffect(() => {
     const saveToServer = async () => {
+      // Only save if completed and we have results
       if (isComplete && results.length > 0) {
-        // Prevent duplicate saves for the same session during a single session run
-        const sessionId = fileName + "_" + results.length;
-        if (sessionStorage.getItem(`saved_${sessionId}`)) return;
+        // Use a more unique session ID based on completion timestamp
+        const finalSessionId = `session_${Date.now()}`;
+        
+        // Prevent duplicate saves in the same component lifecycle
+        const existingSave = sessionStorage.getItem(`last_saved_${fileName}`);
+        if (existingSave === results.length.toString()) return;
 
         const newSession = {
           id: Date.now().toString(),
           fileName,
           date: new Date().toLocaleString(),
-          results
+          results: [...results] // Shallow copy to be safe
         };
 
         try {
-          await fetch("/api/sessions", {
+          const res = await fetch("/api/sessions", {
             method: "POST",
+            headers: { "Content-Type": "application/json" },
             body: JSON.stringify(newSession),
           });
-          sessionStorage.setItem(`saved_${sessionId}`, "true");
-          // Trigger sidebar refresh
-          window.dispatchEvent(new Event('refresh-sessions'));
+
+          if (res.ok) {
+            sessionStorage.setItem(`last_saved_${fileName}`, results.length.toString());
+            // Trigger sidebar refresh
+            window.dispatchEvent(new Event('refresh-sessions'));
+          }
         } catch (err) {
-          console.error("Failed to save session to server:", err);
+          console.error("Failed to auto-save session:", err);
         }
       }
     };
 
     saveToServer();
-  }, [isComplete, results, fileName]);
+  }, [isComplete, results.length, fileName]);
 
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);

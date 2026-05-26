@@ -19,6 +19,8 @@ export async function POST(req: Request) {
     await saveSession(session);
     return NextResponse.json({ success: true });
   } catch (error) {
+    console.error("API Session Save Error:", error);
     return NextResponse.json({ error: "Failed to save session" }, { status: 500 });
   }
 }
+

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import { getDynamicModel } from "@/utils/gemini";
+import { getPrioritizedModels } from "@/utils/gemini";
 
 const API_KEYS = [
   process.env.GEMINI_API_KEY,
@@ -11,7 +11,6 @@ export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
     const file = formData.get("file") as File;
-    const previousSummary = formData.get("previousSummary") as string || "";
     const apiKeyIndexStr = formData.get("apiKeyIndex") as string || "0";
     let currentApiKeyIndex = parseInt(apiKeyIndexStr);
 
@@ -22,17 +21,7 @@ export async function POST(req: NextRequest) {
     const buffer = await file.arrayBuffer();
     const base64Data = Buffer.from(buffer).toString("base64");
 
-    // Successive fallback logic
-    let lastError = null;
-    while (currentApiKeyIndex < API_KEYS.length) {
-      try {
-        const apiKey = API_KEYS[currentApiKeyIndex];
-        const bestModel = await getDynamicModel(apiKey);
-        
-        const genAI = new GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({ model: bestModel });
-
-        const prompt = `
+    const prompt = `
 You are a dual-mode academic expert: a meticulous scribe and a senior university professor. Your task is to process this lecture chunk into a "Hybrid Academic Note."
 
 STRICT Note Creation Strategy (50/50 Hybrid):
@@ -59,61 +48,85 @@ You must generate TWO distinct sections:
 - Goal: Specially for to generate a note for a notebook. A high-level, scannable summary in bullet points for quick exam revision.
 
 STRICT REQUIREMENT: You must output the exact markers "--- SECTION 1: HYBRID DETAILED NOTE (SINHALA) ---" and "--- SECTION 2: QUICK REVIEW (ENGLISH) ---".
-        `;
+    `;
 
-        const result = await model.generateContent([
-          prompt,
-          {
-            inlineData: {
-              mimeType: "audio/mp3",
-              data: base64Data
+    let lastError = null;
+
+    // Loop through API Keys
+    for (let keyIdx = currentApiKeyIndex; keyIdx < API_KEYS.length; keyIdx++) {
+      const apiKey = API_KEYS[keyIdx];
+      const models = await getPrioritizedModels(apiKey);
+      console.log(`[Fallback] Using API Key #${keyIdx + 1}, Models:`, models);
+
+      // Loop through prioritized models for this key
+      for (const modelName of models) {
+        try {
+          console.log(`[Fallback] Attempting with model: ${modelName}`);
+          const genAI = new GoogleGenerativeAI(apiKey);
+          const model = genAI.getGenerativeModel({ model: modelName });
+
+          const result = await model.generateContent([
+            prompt,
+            {
+              inlineData: {
+                mimeType: "audio/mp3",
+                data: base64Data
+              }
             }
+          ]);
+
+          const responseText = result.response.text();
+          
+          const p1 = responseText.indexOf("--- SECTION 1: HYBRID DETAILED NOTE (SINHALA) ---");
+          const p2 = responseText.indexOf("--- SECTION 2: QUICK REVIEW (ENGLISH) ---");
+          
+          let sinhalaContent = "";
+          let englishContent = "";
+
+          if (p1 !== -1 && p2 !== -1) {
+            sinhalaContent = responseText.substring(p1 + 49, p2).trim();
+            englishContent = responseText.substring(p2 + 41).trim();
+          } else {
+            const parts = responseText.split(/--- SECTION \d: .* ---/);
+            sinhalaContent = parts[1]?.trim() || responseText;
+            englishContent = parts[2]?.trim() || "Review section not generated correctly.";
           }
-        ]);
 
-        const responseText = result.response.text();
-        
-        // Parsing logic
-        const p1 = responseText.indexOf("--- SECTION 1: HYBRID DETAILED NOTE (SINHALA) ---");
-        const p2 = responseText.indexOf("--- SECTION 2: QUICK REVIEW (ENGLISH) ---");
-        
-        let sinhalaContent = "";
-        let englishContent = "";
+          return NextResponse.json({
+            success: true,
+            data: {
+              translation: sinhalaContent,
+              quickSummary: englishContent,
+              transcription: ""
+            },
+            apiKeyIndex: keyIdx
+          });
 
-        if (p1 !== -1 && p2 !== -1) {
-          sinhalaContent = responseText.substring(p1 + 49, p2).trim();
-          englishContent = responseText.substring(p2 + 41).trim();
-        } else {
-          const parts = responseText.split(/--- SECTION \d: .* ---/);
-          sinhalaContent = parts[1]?.trim() || responseText;
-          englishContent = parts[2]?.trim() || "Review section not generated correctly.";
+        } catch (error: any) {
+          console.warn(`[Fallback] Model ${modelName} failed for Key #${keyIdx + 1}:`, error.message);
+          lastError = error;
+          
+          // If it's a quota/overload error, try next model for this key
+          const isRetryable = error.message?.includes("429") || 
+                            error.message?.includes("503") || 
+                            error.message?.includes("RESOURCE_EXHAUSTED") ||
+                            error.message?.includes("quota") ||
+                            error.message?.includes("overloaded");
+          
+          if (isRetryable) {
+            continue; // Try next model for same key
+          } else {
+            break; // If it's another error (like invalid audio), stop this key
+          }
         }
-
-        return NextResponse.json({
-          success: true,
-          data: {
-            translation: sinhalaContent,
-            quickSummary: englishContent,
-            transcription: ""
-          },
-          apiKeyIndex: currentApiKeyIndex
-        });
-
-      } catch (error: any) {
-        lastError = error;
-        const isRateLimit = error.message?.includes("429") || error.message?.includes("RESOURCE_EXHAUSTED");
-        if (isRateLimit && currentKeyIdx < API_KEYS.length - 1) {
-          currentApiKeyIndex++;
-          continue;
-        }
-        break;
       }
+      // If we reach here, all models for this key failed. Outer loop continues to next API Key.
     }
 
-    throw lastError || new Error("Failed to process chunk");
+    throw lastError || new Error("All API keys and models exhausted");
 
   } catch (error: any) {
-    console.error("Transcription Error:", error);
+    console.error("Critical Transcription Error:", error);
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import { GEMINI_MODEL, AVAILABLE_MODELS } from "@/utils/gemini";
+import { getPrioritizedModels } from "@/utils/gemini";
 
 const API_KEYS = [
   process.env.GEMINI_API_KEY,
@@ -15,12 +15,19 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Message is required" }, { status: 400 });
     }
 
+    if (API_KEYS.length === 0) {
+      return NextResponse.json({ error: "No API keys configured" }, { status: 500 });
+    }
+
+    const firstKey = API_KEYS[0];
+    const prioritizedModels = await getPrioritizedModels(firstKey);
+    
     let lastError = null;
     
-    // Try each available model in order
-    for (const modelId of AVAILABLE_MODELS) {
+    // Try prioritized models for the first key (standard chat behavior)
+    for (const modelId of prioritizedModels) {
       try {
-        const genAI = new GoogleGenerativeAI(API_KEYS[0]);
+        const genAI = new GoogleGenerativeAI(firstKey);
         const model = genAI.getGenerativeModel({ 
           model: modelId,
           systemInstruction: `You are an advanced academic tutor. A student is asking a follow-up question regarding a topic they are studying. 
@@ -33,21 +40,24 @@ ${context || "No context provided."}
 Answer the student's question accurately using both the reference notes provided above AND your own foundation model knowledge to explain the concept deeply, provide fresh real-world examples, and simplify it so the student understands perfectly. You must reply in the same language the student uses (If they ask in Sinhala/Singlish, reply in clear Sinhala. If they ask in English, reply in English).`
         });
 
-        // We can use a chat session for history
         const chat = model.startChat({
           history: history || [],
         });
 
         const result = await chat.sendMessageStream(message);
 
-        // Create a stream for the response
         const stream = new ReadableStream({
           async start(controller) {
-            for await (const chunk of result.stream) {
-              const chunkText = chunk.text();
-              controller.enqueue(new TextEncoder().encode(chunkText));
+            try {
+              for await (const chunk of result.stream) {
+                const chunkText = chunk.text();
+                controller.enqueue(new TextEncoder().encode(chunkText));
+              }
+            } catch (streamErr) {
+              console.error("Stream error:", streamErr);
+            } finally {
+              controller.close();
             }
-            controller.close();
           },
         });
 
@@ -58,11 +68,16 @@ Answer the student's question accurately using both the reference notes provided
         });
       } catch (err: any) {
         lastError = err;
-        if (err.message?.includes("404") || err.message?.includes("not found")) {
-          console.warn(`[Chat] Model ${modelId} not found, trying next...`);
+        const isRetryable = err.message?.includes("404") || 
+                           err.message?.includes("not found") ||
+                           err.message?.includes("429") ||
+                           err.message?.includes("503");
+        
+        if (isRetryable) {
+          console.warn(`[Chat] Model ${modelId} failed, trying next prioritized model...`);
           continue;
         }
-        throw err; // For other errors like 429
+        throw err;
       }
     }
 

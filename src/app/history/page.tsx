@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, Suspense } from "react";
 import { 
   ArrowLeft, 
   Trash2, 
@@ -23,7 +23,7 @@ interface Session {
   results: any[];
 }
 
-export default function HistoryPage() {
+function HistoryContent() {
   const searchParams = useSearchParams();
   const sessionIdParam = searchParams.get("session");
   
@@ -188,5 +188,18 @@ export default function HistoryPage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function HistoryPage() {
+  return (
+    <Suspense fallback={
+      <div className="flex flex-col items-center justify-center py-24 gap-4">
+        <Loader2 className="w-12 h-12 text-primary animate-spin" />
+        <p className="text-muted-foreground font-medium">Loading History...</p>
+      </div>
+    }>
+      <HistoryContent />
+    </Suspense>
   );
 }
